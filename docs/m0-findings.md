@@ -33,11 +33,16 @@ Required shape:
       "id": "pdf-noir@zotero-plugins",
       "update_url": "https://.../update.json",
       "strict_min_version": "6.999",
-      "strict_max_version": "10.0.*"
+      "strict_max_version": "10.*"
     }
   }
 }
 ```
+
+> `strict_max_version` was later widened from `10.0.*` to `10.*` at release
+> time: a `10.0.*` ceiling would have locked every user out of updates the
+> moment Zotero 10.1 shipped. `strict_min_version` remains `10.0.6`, the only
+> release the plugin was actually verified against.
 
 `onMainWindowLoad` / `onMainWindowUnload` must exist (even as no-ops) or Zotero logs a
 warning on every window open.

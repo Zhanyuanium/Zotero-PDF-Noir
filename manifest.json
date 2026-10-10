@@ -9,7 +9,7 @@
       "id": "pdf-noir@zotero-plugins",
       "update_url": "https://github.com/Zhanyuanium/Zotero-PDF-Noir/releases/latest/download/update.json",
       "strict_min_version": "10.0.6",
-      "strict_max_version": "10.0.*"
+      "strict_max_version": "10.*"
     }
   }
 }
