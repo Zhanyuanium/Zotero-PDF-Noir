@@ -1,18 +1,29 @@
-/* Zotero PDF Noir — pixel transform (M2).
+/* Zotero PDF Noir — pixel transform (M3).
  *
  * Runs inside the pdf.js viewer realm. Pure typed-array pixel work on the
  * ImageData of the source rect, at original resolution, single pass.
  *
- * Rules (all thresholds derive from sensitivity s, 0..1):
- *  1. Near-white neutral pixels are removed globally: alpha = 255 * (1 - wBg)
- *     where wBg is a smooth lightness/saturation weight, so antialiased
- *     edges fade instead of getting a hard halo. There is no connectivity
- *     test and no interior exception — any pixel close to white is treated
- *     as background, wherever it is.
- *  2. Neutral dark ink is lifted toward the theme foreground color
- *     (fg -> white ramp). Every lift-eligible pixel is lifted, including
- *     ink that used to sit on white fills.
- *  3. Saturated pixels are untouched (absolute channel spread gate).
+ * The neutral lightness axis is handled by ONE mirror-symmetric band
+ * (see `params`): a near-white end and a near-black end that share the same
+ * width, the same ramp shape and the same chromatic gate. The two ends get
+ * the two symmetric effects:
+ *
+ *   near-white end -> remove:  alpha = 255 * (1 - wWhite)
+ *   near-black end -> flip:    rgb   = mix(rgb, flipped, wDark)
+ *
+ * `flipped` is the mirror of the pixel's lightness (L -> 1 - L) placed on the
+ * theme foreground -> white axis, so the darkest ink lands on the theme
+ * foreground and pure black approaches white — the mirror of the near-white
+ * end becoming the theme background. The middle of the axis is untouched.
+ *
+ * Chromatic pixels (absolute channel spread >= neutralSpread) are never
+ * modified. All thresholds derive from the sensitivity pref s (0..1).
+ *
+ * The figure's content is baked into the bitmap (lines, labels, satellite
+ * icons, ...) and goes through this transform. If the PDF also draws vector
+ * copies of figure elements over the bitmap, Zotero's Blender already maps
+ * those styles to theme-light colours; page-level vector content (body text,
+ * column rules) is out of scope as well.
  *
  * All output is written back into the given ImageData in place.
  */
@@ -26,17 +37,21 @@
     return v < 0 ? 0 : v > 1 ? 1 : v;
   }
 
+  /**
+   * Shared neutral-band parameters, derived from sensitivity s (0..1).
+   * The band is mirror-symmetric around L = 0.5:
+   *   white: [whiteLo, whiteHi]   (alpha ramp)
+   *   black: [darkLo, darkHi]     with darkLo = 1 - whiteHi, darkHi = 1 - whiteLo
+   * Defaults (s = 0.7): white [0.768, 0.934], black [0.066, 0.232].
+   */
   function params(s) {
+    var whiteLo = 0.88 - 0.16 * s;
+    var whiteHi = 0.99 - 0.08 * s;
     return {
-      // near-white background removal weight (alpha)
-      loL: 0.86 - 0.08 * s,
-      hiL: 0.99 - 0.06 * s,
-      satHi: 0.3 - 0.08 * s,
-      satLo: 0.12 - 0.04 * s,
-      // neutral ink lift
-      liftPivot: 0.5 + 0.25 * s,
-      liftMax: 0.95 + 0.03 * s,
-      liftFade: 0.05,
+      whiteLo: whiteLo,
+      whiteHi: whiteHi,
+      darkHi: 1 - whiteLo,
+      darkLo: 1 - whiteHi,
       neutralSpread: 40 + 24 * s,
     };
   }
@@ -51,6 +66,41 @@
       return [0, 0, 0];
     }
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  /**
+   * Evaluate the neutral band for one colour: the single decision function of
+   * the pixel transform (called once per pixel by `transformImageData`;
+   * exported for console debugging and tests).
+   *
+   * @param {number} r @param {number} g @param {number} b 0..255
+   * @param {object} P params(s)
+   * @param {number[]} fg theme foreground rgb (0..255)
+   * @returns {?{L:number, wWhite:number, wDark:number, flip:number[]}}
+   *   null for chromatic colours (absolute spread gate)
+   */
+  function neutralEval(r, g, b, P, fg) {
+    var mx = r > g ? (r > b ? r : b) : g > b ? g : b;
+    var mn = r < g ? (r < b ? r : b) : g < b ? g : b;
+    var spread = mx - mn;
+    if (spread >= P.neutralSpread) {
+      return null; // chromatic -> untouched
+    }
+    var wSat = (P.neutralSpread - spread) / P.neutralSpread;
+    var L = (2126 * r + 7152 * g + 722 * b) / 2550000;
+
+    var wWhite = clamp01((L - P.whiteLo) / (P.whiteHi - P.whiteLo)) * wSat;
+    var wDark = clamp01((P.darkHi - L) / (P.darkHi - P.darkLo)) * wSat;
+
+    // Flipped colour: the mirror of the lightness (1 - L) on the
+    // foreground -> white axis.
+    var Lf = 1 - L;
+    var flip = [
+      fg[0] + (255 - fg[0]) * Lf,
+      fg[1] + (255 - fg[1]) * Lf,
+      fg[2] + (255 - fg[2]) * Lf,
+    ];
+    return { L: L, wWhite: wWhite, wDark: wDark, flip: flip };
   }
 
   /**
@@ -73,42 +123,25 @@
       var r = data[p];
       var gg = data[p + 1];
       var b = data[p + 2];
-      var mx = r > gg ? (r > b ? r : b) : gg > b ? gg : b;
-      var mn = r < gg ? (r < b ? r : b) : gg < b ? gg : b;
-      var spread = mx - mn;
-      var L = (2126 * r + 7152 * gg + 722 * b) / 2550000;
-      var S = mx === 0 ? 0 : spread / mx;
+      var e = neutralEval(r, gg, b, P, fg);
+      if (!e) {
+        continue; // chromatic
+      }
 
-      // 1) near-white background removal, global and smooth
-      var wL = clamp01((L - P.loL) / (P.hiL - P.loL));
-      var wS = clamp01((P.satHi - S) / (P.satHi - P.satLo));
-      var wbg = wL * wS;
-      if (wbg > 0) {
-        data[p + 3] = data[p + 3] * (1 - wbg);
-        if (wbg > 0.5) {
+      // near-white end: remove
+      if (e.wWhite > 0) {
+        data[p + 3] = data[p + 3] * (1 - e.wWhite);
+        if (e.wWhite > 0.5) {
           removed++;
         }
       }
 
-      // 2) lift neutral dark ink toward the theme foreground
-      var wl;
-      if (L <= P.liftMax - P.liftFade) {
-        wl = 1;
-      } else if (L >= P.liftMax) {
-        wl = 0;
-      } else {
-        wl = (P.liftMax - L) / P.liftFade;
-      }
-      var ws = spread >= P.neutralSpread ? 0 : (P.neutralSpread - spread) / P.neutralSpread;
-      var wgt = wl * ws;
-      if (wgt > 0) {
-        var tt = L >= P.liftPivot ? 1 : L / P.liftPivot;
-        var nr = fg[0] + (255 - fg[0]) * tt;
-        var ng = fg[1] + (255 - fg[1]) * tt;
-        var nb = fg[2] + (255 - fg[2]) * tt;
-        data[p] = data[p] * (1 - wgt) + nr * wgt;
-        data[p + 1] = data[p + 1] * (1 - wgt) + ng * wgt;
-        data[p + 2] = data[p + 2] * (1 - wgt) + nb * wgt;
+      // near-black end: flip the lightness toward the foreground
+      if (e.wDark > 0) {
+        var wd = e.wDark;
+        data[p] = r + (e.flip[0] - r) * wd;
+        data[p + 1] = gg + (e.flip[1] - gg) * wd;
+        data[p + 2] = b + (e.flip[2] - b) * wd;
       }
     }
     return { removedFrac: N ? removed / N : 0 };
@@ -117,6 +150,7 @@
   NS.transform = {
     params: params,
     hexToRgb: hexToRgb,
+    neutralEval: neutralEval,
     transformImageData: transformImageData,
   };
 })();

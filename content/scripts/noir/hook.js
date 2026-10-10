@@ -1,4 +1,4 @@
-/* Zotero PDF Noir — Blender hook (M2.1).
+/* Zotero PDF Noir — Blender hook (M3).
  *
  * Runs inside the pdf.js viewer realm. Intercepts the fork's image path:
  *
@@ -34,7 +34,7 @@
   var g = typeof window !== "undefined" ? window : globalThis;
   var NS = (g.PDFNoir = g.PDFNoir || {});
 
-  var BUILD = "M2.1";
+  var BUILD = "M3.0";
   var MAX_PIXELS = 8e6;
   var LOG_CAP = 800;
   var ATTACH_TRIES = 120;
@@ -248,6 +248,9 @@
       return; // light mode or skipBlender
     }
     var proto = Object.getPrototypeOf(blender);
+    if (!proto) {
+      return;
+    }
     if (proto.__pdfNoirCustom) {
       return;
     }

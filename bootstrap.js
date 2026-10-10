@@ -21,7 +21,7 @@
 
 var ADDON_ID = "pdf-noir@zotero-plugins";
 var LOG_PREFIX = "[PDF-Noir]";
-var BUILD = "M2.1";
+var BUILD = "M3.0";
 var NOIR_FILES = [
   "content/scripts/noir/classify.js",
   "content/scripts/noir/transform.js",

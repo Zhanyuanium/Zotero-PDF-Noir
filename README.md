@@ -2,9 +2,13 @@
 
 Dark-mode image handling for the Zotero PDF reader. Embedded figures with a
 white background stop glaring: near-white neutral pixels become transparent
-(globally — no interior exceptions), neutral dark ink is lifted to the theme
-foreground color, and saturated colors are preserved. Text-only pages and
-vector figures are left to Zotero's own dark mode (the pdf.js `Blender`).
+(globally — no interior exceptions), near-black neutral pixels have their
+lightness flipped toward the theme foreground (one shared, mirror-symmetric
+band drives both ends), and saturated colors are preserved. The figure's
+outlines, labels, icons and grid lines are baked into the raster image and go
+through this pixel transform; any vector copies the PDF draws over it are
+mapped by Zotero's own dark mode (the pdf.js `Blender`), as is page-level
+vector content.
 
 Verified on Zotero 10.0.6 (Firefox ESR 140) with the sample paper in
 `samples/` (Fig. 1 page 2, Fig. 3 page 5), dark reader theme.
@@ -113,27 +117,39 @@ colored curves on white are caught.
 
 ### Transform (`transform.js`)
 
-1. **Near-white -> transparent, globally.** Every pixel gets
-   `alpha = 255 * (1 - wBg)` where `wBg` is a smooth lightness/saturation
-   weight (nothing is removed below the lightness ramp), so antialiased
-   edges fade instead of getting a hard halo. There is no connectivity test
-   and no interior exception: a pixel close to white is background wherever
-   it is (white fills, panels, baked-in white text included).
-2. **Neutral ink is lifted to the foreground.** Neutral pixels (absolute
-   channel spread gate) with L below `liftMax` are mapped toward the theme
-   foreground color, ramped to white for lighter values. This includes ink
-   that used to sit on white fills (e.g. black grid lines on a white plane
-   become light lines on the now-transparent background).
-3. **Saturated pixels are untouched** (absolute channel spread gate), so
-   red/orange/blue/green curves stay their original color.
+The neutral lightness axis is handled by **one mirror-symmetric band**
+(`params(s)`): a near-white end and a near-black end of the same width, with
+the same ramp shape and the same chromatic gate. The two ends get the two
+symmetric effects:
+
+| End | Band (s = 0.7) | Effect |
+|---|---|---|
+| near-white | `[whiteLo, whiteHi]` = `[0.768, 0.934]` | `alpha = 255 * (1 - wWhite)` — removed |
+| near-black | `[darkLo, darkHi]` = `[0.066, 0.232]` | `rgb = mix(rgb, flipped, wDark)` — lightness flipped |
+
+`darkLo = 1 - whiteHi` and `darkHi = 1 - whiteLo`, so the two ends always
+share the band width; `sensitivity` widens or narrows both together. The
+ramps are smooth, so antialiased edges fade instead of getting a hard halo.
+The middle of the axis is untouched.
+
+`flipped` is the mirror of the pixel's lightness (`L -> 1 - L`) placed on the
+theme foreground -> white axis, so the darkest ink lands on the theme
+foreground and pure black approaches white — the mirror of the near-white end
+becoming the theme background.
+
+**Saturated pixels are untouched** (absolute channel spread gate
+`spread >= neutralSpread`), so red/orange/blue/green curves stay their
+original color. There is no connectivity test and no interior exception:
+near-white is background wherever it is (white fills, panels, baked-in white
+text included).
 
 The transform mutates the `ImageData` in place in a single pass. It is
 cached per upstream image identity + source rect + pixel size + parameters;
 repeated renders of the same figure at the same scale (scroll, repaint) are
 cache hits, and changing only `sensitivity` reuses the cached classification
 features and recomputes only the transform. Measured cost on the sample
-paper: ~10 ms for an 815x629 figure, ~30 ms for 1629x1258 (first render
-only).
+paper: ~20 ms for an 815x629 figure, ~85-135 ms for 1629x1258/2100x2389
+(first render only).
 
 ### Logging
 
@@ -142,10 +158,11 @@ Everything goes to the Zotero debug log with the `[PDF-Noir]` prefix
 image draw, hit or miss:
 
 ```
-[PDF-Noir] #1 img1 815x629 noir cache=miss cls=miss feats{white=0.880 lowSat=0.968 flat=0.891 dark=0.023} thr{white=0.261 lowSat=0.575 flat=0.375} ms=14 removed=0.895
-[PDF-Noir] #2 img2 900x675 pass cls=miss feats{white=0.000 lowSat=0.217 flat=0.328 dark=0.031} thr{white=0.261 lowSat=0.575 flat=0.375} ms=4
+[PDF-Noir] #1 img1 815x629 src=up noir cache=miss cls=miss feats{white=0.880 lowSat=0.968 flat=0.891 dark=0.023} thr{white=0.261 lowSat=0.575 flat=0.375} ms=20 removed=0.895
+[PDF-Noir] #2 img2 900x675 src=up pass cls=miss feats{white=0.000 lowSat=0.217 flat=0.328 dark=0.031} thr{white=0.261 lowSat=0.575 flat=0.375} ms=3
 ```
 
+`src=up` means the cache key came from the upstream `imgData`/bitmap;
 `noir` = transformed, `pass` = handed to Blender unchanged (`skip=...` names
 the reason: `lightTheme`, `forceInversion`, `entirePage`, `tooLarge`).
 `cache=` is the transformed-canvas cache, `cls=` the classification-feature
@@ -169,7 +186,7 @@ How to change them:
 2. Search for `extensions.pdf-noir`.
 3. `extensions.pdf-noir.enable` is a boolean; `extensions.pdf-noir.sensitivity`
    is a **string** between `"0"` and `"1"` — higher is more aggressive
-   (removes more near-white, lifts more ink), default `"0.7"`.
+   (widens the shared neutral band at both ends), default `"0.7"`.
 4. Changes apply within about 1.5 s while a reader is open; to see them
    immediately, zoom or scroll the PDF so the page re-renders (the cached
    result is keyed by sensitivity, so the new value takes effect on the next
@@ -211,19 +228,26 @@ The xpi root contains only `manifest.json`, `bootstrap.js`, `prefs.js` and
 
 - **All near-white neutral pixels are removed**, including interior white
   fills and panels (the white plane in Fig. 1, the white plot interiors in
-  Fig. 3). Ink on them is lifted to the foreground color, so black grid
-  lines and text on white become light and stay readable. This is the
-  intended behavior (no interior exception).
+  Fig. 3). Near-black ink on them is flipped to the foreground color, so
+  black grid lines and text on white become light and stay readable. This is
+  the intended behavior (no interior exception).
 - **Light, low-saturation fills are faded too** (e.g. the pale pink ellipse
   in Fig. 1 becomes a muted, slightly transparent pink). This is the direct
   cost of "any near-white neutral pixel is background"; lower
   `sensitivity` to keep more of such tints.
-- **Near-black vector overlays are not pixel-transformed.** Some PDFs draw
-  part of a figure as vector shapes on top of the bitmap (Fig. 1 has 37 such
-  near-black vector paths: the large arrows and some labels). Those go
-  through Zotero's vector path, not through this plugin's image transform,
-  and may stay black on a dark background. The raster parts of the same
-  figure are transformed normally.
+- **The figure's dark line work is flipped by the pixel transform.** The
+  outlines, labels, icons and grid lines are baked into the raster image, so
+  the shared near-black band reaches them (measured on Fig. 1: pixels darker
+  than 40 in the figure area go from 2516 to 0 between the previous build and
+  this one).
+- **The PDF may also draw vector copies of figure elements on top of the
+  bitmap** (page 2 of the sample has 35 near-black filled annotation paths
+  whose rects lie inside the image rect). Those are already mapped to
+  theme-light colours by Zotero's own Blender before this plugin sees them
+  (measured: `styles seen=50 rewritten=0`; the values that arrive are
+  `stroke #d8dee9`, `fill #b5bbc6`), so they are not a cause of dark-looking
+  outlines and the plugin does not intervene. A vector-layer hook was tried
+  in M3 and removed again as redundant.
 - Entire-page raster images (scans) are passed through to Blender's existing
   handling; they are not noir-processed.
 - Themes with `invertImages` (e.g. Zotero's "Black" theme) are passed

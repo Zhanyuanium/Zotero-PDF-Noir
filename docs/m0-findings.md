@@ -189,3 +189,64 @@ The accumulated `bootstrap.js` probe (prototype wrapper, instance accessor trap,
 `getContext` hook, `putImageData` hook, `transferFromImageBitmap` hook, three-lane
 selftest, realm diagnostics) is obsolete now that the interception point is known. It was
 deleted and rewritten for M1 rather than patched further.
+
+## 8. M3 finding: vector overlay copies sit on top of the bitmap (and why the vector hook is still redundant)
+
+Re-verified with pymupdf, checking **both** colour keys (`fill` and `color`) and the
+geometry of every drawing:
+
+| Page | Bitmap rect (pt) | Drawings | Near-black `fill == (23,23,21)` |
+| --- | --- | --- | --- |
+| 2 (Fig. 1) | `[67.07, 73.49, 262.69, 224.59]`, xref 82, 1629x1258, no SMask | 44 | 37 paths; **35 of them inside the bitmap rect**, 2 straddling its edge (y=67, x=267) |
+| 5 (Fig. 3) | `[37.44, 66.84, 289.44, 353.52]`, xref 125, 2100x2389, no SMask | 285 | none inside the bitmap rect (the dark ones are page furniture, y=443, ...) |
+
+The 37 page-2 paths are curve/line/rect fills (`items` kinds: 1929 `c`, 1277 `l`, 9 `re`)
+with label-sized bounding boxes (1x3 pt to 33x7 pt), drawn after the image — they are the
+**vector copies (outlined paths) of the figure annotations** (handover, UAV, SROI,
+LEO SUT, Search phase, ...) that the PDF lays over the bitmap. So "the PDF draws a vector
+layer on top of the figure bitmap" **is a real, verified fact**.
+
+What is *not* true is the inference that this layer makes the outlines look dark. The M3
+diagnostic chained onto the vector style accessor and logged what Blender had already
+produced for those styles:
+
+```
+[PDF-Noir] vector hook armed build=M3.0 (fill=true stroke=true)
+[PDF-Noir] vector seen stroke #d8dee9      (= theme foreground)
+[PDF-Noir] vector seen fill #b5bbc6        (= mid light)
+[PDF-Noir] vector: styles seen=50 rewritten=0
+```
+
+Blender's `interceptStyleProperty` / `getCanvasStyle` already map the near-black vector
+colours to theme light values before any plugin code sees them, so the vector layer was
+never the cause of dark-looking outlines. The M2.1 defect had a different root cause: the
+pixel transform's **one-sided lift** did not reach the dark strokes that need flipping
+once the white background is removed — and the figure's main line work is baked into the
+bitmap. The M3 mirror-symmetric band (near-white removed, near-black flipped) is the fix:
+
+- very dark pixels (`max < 40`) inside the Fig. 1 figure area: **2516 → 0**;
+- near-`(23,23,21)` pixels on the same view: **633 → 6**.
+
+Consequences:
+
+- The vector hook is **redundant** — Blender already maps those styles, and the pixel
+  layer covers the bitmap (verified: with the hook removed the outlines stay light, 0
+  very-dark pixels). It was removed again in M3 and no vector hook ships.
+- **Forced rasterization is unnecessary** (and was rejected anyway): it would reintroduce
+  antialiasing artefacts on thin lines and race pdf.js's render/zoom/theme cycle, while
+  the pixel path already covers the figure's line work.
+
+### Methodology note (this project misjudged twice)
+
+`page.get_drawings()` in pymupdf reports a path's **fill** colour under `fill` and its
+**stroke** colour under `color`. There is **no `stroke` key**. Filtering on `d['stroke']`
+silently matches nothing, and a probe that only inspects `color` misses every *filled*
+path — which is exactly how this project produced two false negatives in a row:
+
+1. "the page has no dark vector objects" (only `color` checked);
+2. "the near-black vector objects are all outside the image rect" (only the 7 stroke-only
+   page-furniture objects were seen; the 35 filled annotation copies inside the figure
+   rect were invisible to the probe).
+
+Always check both keys, and verify the geometry (does the object's rect fall inside the
+image rect?) before drawing conclusions about which drawing layer causes a visual effect.
