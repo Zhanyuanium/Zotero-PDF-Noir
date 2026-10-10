@@ -1,0 +1,11 @@
+{
+  "name": "zotero-pdf-noir",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Zotero PDF Noir plugin: dark-mode PDF image handling for the Zotero reader",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "clean": "bun scripts/clean.ts"
+  }
+}

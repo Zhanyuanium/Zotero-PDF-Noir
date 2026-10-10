@@ -1,0 +1,191 @@
+# M0 Findings: How Zotero 10.0.6 Dark Mode Actually Renders PDF Images
+
+Status: M0 complete (verified on Zotero 10.0.6, Firefox ESR 140, build 20261007153950).
+All claims below were verified against the shipped bundle, not inferred from upstream docs.
+
+## Environment
+
+| Item | Value |
+| --- | --- |
+| Zotero | 10.0.6 (x64), `C:\Program Files\Zotero` |
+| Gecko base | Firefox ESR 140 (`platform.ini`, `mozilla-esr140`) |
+| Plugin bundle | `resource/reader/pdf/build/pdf.mjs` inside `app/omni.ja` |
+| Manifest requirement | `applications.zotero` must carry **all three** of `id`, `update_url`, `strict_max_version` |
+
+## 1. Packaging: why the XPI was rejected
+
+`manifest.json` using `applications.gecko` is not recognized by Zotero. Worse, a Zotero
+extension manifest that omits `update_url` is parsed as invalid, and the installer reports
+the generic "incompatible with this version of Zotero" dialog. Both were root causes of a
+plugin that would not install.
+
+Required shape:
+
+```json
+{
+  "manifest_version": 2,
+  "applications": {
+    "zotero": {
+      "id": "pdf-noir@zotero-plugins",
+      "update_url": "https://.../update.json",
+      "strict_min_version": "6.999",
+      "strict_max_version": "10.0.*"
+    }
+  }
+}
+```
+
+`onMainWindowLoad` / `onMainWindowUnload` must exist (even as no-ops) or Zotero logs a
+warning on every window open.
+
+`prefs.js` must live in the plugin root. Float defaults are unsafe: Firefox default prefs
+have no float type, so `0.7` reads back as int `0`. Store numerics as strings.
+
+## 2. Dark mode is not a CSS filter
+
+`pdfjs/viewer.css` contains no `filter: invert`. The `img, svg { filter: invert(1) }` rule
+in the reader's `inject.scss` applies only to the DOM snapshot/EPUB path, never to the PDF
+canvas. The PDF canvas dark theme comes from the `Blender` class in the pdf.js fork.
+
+Dark mode is signalled to the viewer realm by `window.theme`
+(`{ background, foreground, invertImages }`), set by `pdf-view.js` `_updateColorScheme()`.
+
+## 3. The hook that actually matters: `Blender`
+
+`src/display/canvas.js` `beginDrawing()` (bundle line ~11460):
+
+```js
+if (typeof window !== 'undefined' && window.theme && !this.ctx.skipBlender) {
+  this.blender = new Blender(this.ctx, window.theme);
+  this.blender.pageWidth = viewport.width * Math.abs(transform ? transform[0] : 1);
+  this.blender.pageHeight = viewport.height * Math.abs(transform ? transform[3] : 1);
+}
+```
+
+`Blender`'s constructor (line ~10570) immediately overwrites context methods as **own
+instance properties**:
+
+```js
+this.origDrawImage = this.ctx.drawImage.bind(this.ctx);
+this.ctx.drawImage = (...args) => this.customDrawImage(args);
+```
+
+`unwrap()` restores them, and `endDrawing` calls it (line ~11595).
+
+### Why every canvas-level probe failed
+
+Wrapping `CanvasRenderingContext2D.prototype.drawImage`, installing per-context
+`drawImage` accessors, and hooking `getContext` **all fail to observe real page paints**.
+Blender constructs after those hooks are installed and overwrites the instance property
+with a plain value, discarding the accessor chain. Evidence gathered:
+
+- `watching context drawImage shape=accessor hasCell=true setHits=1` — the accessor was
+  installed and was replaced exactly once, by Blender, at `beginDrawing`.
+- `selftest A (ctx.drawImage): calls=1 shape=accessor watched=true` — a probe issued
+  *before* `beginDrawing` is caught, proving the trap itself is alive.
+- Zero `#N drawImage` lines for actual page paints, across many re-renders (every zoom
+  level rebuilt page canvases at new sizes and the counters never moved).
+
+Ruled out along the way: `transferControlToOffscreen` (absent from the bundle),
+`bitmaprenderer`/`transferFromImageBitmap` (present only in the SVG cache → blob path,
+irrelevant to page rendering), detached-method calls (`ctx.drawImage.call` and explicit
+re-assignment both behave identically).
+
+Consequence: **`customDrawImage` is the correct interception point for M1.** Canvas-level
+instrumentation cannot work and should not be retried.
+
+## 4. `customDrawImage` already computes what M1 needs
+
+Bundle line ~10813. For every image it:
+
+1. Resolves the source rect (handles the 3-, 5-, and 9-argument overloads).
+2. Computes `entirePage` via `getTransformedBoundingBox`, with a 25% area tolerance.
+3. Rasterizes the source region into an offscreen canvas and calls `getImageData` —
+   so pixel data is **already in hand**, no extra GPU read-back is required.
+4. Classifies into one of four types.
+
+Classification (`type` defaults to `"overlay"`):
+
+| Type | Condition |
+| --- | --- |
+| `invert` | `theme.invertImages` (forced), or an entire-page image with `averageLightness >= 150` while dark (also sets `forceInversion`) |
+| `gradient` | not dark, entire page, `averageLightness >= 150 && neutralRatio >= 0.9` |
+| `replace` | not entire page, `distinctColors(imageData, 3) <= 2` |
+| `overlay` | everything else |
+
+The helper functions already exist on the instance: `averageLightness` (BT.601 weights,
+alpha < 64 treated as white), `neutralRatio` (deviation 12, sampled every 16 px, skips
+alpha < 32), `distinctColors` (unique-RGB count with early exit at the cutoff), and
+`isColorNeutral` (max channel spread < deviation).
+
+### Why embedded line art ends up as `overlay`
+
+`distinctColors(imageData, 3) <= 2` requires a nearly monochrome figure. A figure with
+coloured curves and annotations has far more, so it falls through to `overlay`, which only
+dims it — no RGB inversion, just a lower alpha:
+
+```js
+this.ctx.globalCompositeOperation = "source-over";
+this.ctx.globalAlpha = entirePage ? 1 : 0.8;
+this.origDrawImage(...args);
+```
+
+That is exactly the reported defect: the white background survives (dimmed by alpha) while
+dark line work on it is not inverted and remains effectively invisible on the dark
+background.
+
+## 5. Sample PDF (M1 test fixture)
+
+`samples/Dual-Grained_Recursive_Bayesian_Filtering_...pdf`, 6 pages, three raster images:
+
+| Page | Object | Size |
+| --- | --- | --- |
+| 2 | `/Im1` | 1629×1258 (Fig. 1) |
+| 3 | `/Im2` | 347×203 |
+| 5 | `/Im3` | 2100×2389 (Fig. 3) |
+
+No `/Subtype /Form` XObjects, so all figure content reaches `customDrawImage`.
+
+## 6. Design decisions (as implemented)
+
+The M1/M2 implementation follows this list; differences from the original M0
+proposal are noted.
+
+- **Intercept `customDrawImage`, not canvas APIs.** `Blender.prototype.customDrawImage`
+  is wrapped from inside the viewer realm via the instance chain
+  (`PDFPageProxy.render` -> `InternalRenderTask.initializeGraphics` -> `Blender`).
+  Implemented as proposed.
+- **Own `getImageData`, synchronously.** The original proposal was to reuse the
+  `imageData` Blender already extracted; that is not reachable from a wrapper around
+  `customDrawImage`, so the plugin rasterizes the source rect and calls `getImageData`
+  itself, in the same synchronous draw call. Cost measured on the sample paper:
+  ~10 ms for 815x629, ~30 ms for 1629x1258 (first render only, cached afterwards).
+- **Discriminators** for white-background line art vs photography: near-white ratio,
+  low-saturation ratio, flat-region ratio (plus a logged dark-neutral ratio). Aggressive
+  defaults per the product decision, exposed through the `sensitivity` pref.
+  Implemented as proposed.
+- **Transform:** *differs from the original proposal.* The original text proposed making
+  only the border-connected near-white background transparent and keeping interior whites
+  (fills, baked-in text). The product decision for M2 is the opposite: **every** near-white
+  neutral pixel is removed globally, with no connectivity test and no interior exception;
+  all neutral ink (including ink that sat on white fills) is lifted to the foreground.
+  Saturated pixels still keep their original RGB. Alpha removal uses a smooth
+  lightness/saturation weight, so antialiased edges fade rather than getting a hard halo.
+- **Caching:** per upstream image identity (the pdf.js `imgData`/bitmap recorded by
+  wrapping `CanvasGraphics.paintInlineImageXObject[Group]` — *not* the temporary canvas
+  `_scaleImage` creates per render) + source rect + pixel size; classification features
+  are cached independently of sensitivity and theme colors, the transformed canvas is
+  cached per parameter set. Repeated renders at the same scale are cache hits.
+- **Safety:** every pdf.js internal touched is checked for existence first (a Zotero
+  update degrades to "do not intervene"); the original method is called exactly once per
+  draw and any error in the noir preparation falls back to it; light themes
+  (`!blender.dark`), `ctx.skipBlender` and `invertImages` themes are passed through;
+  uninstall restores all wrapped methods and deletes their markers so a disable/enable
+  cycle re-installs cleanly.
+
+## 7. M0 code disposition
+
+The accumulated `bootstrap.js` probe (prototype wrapper, instance accessor trap,
+`getContext` hook, `putImageData` hook, `transferFromImageBitmap` hook, three-lane
+selftest, realm diagnostics) is obsolete now that the interception point is known. It was
+deleted and rewritten for M1 rather than patched further.
