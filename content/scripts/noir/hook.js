@@ -1,4 +1,4 @@
-/* Zotero PDF Noir — Blender hook (M3).
+/* Zotero PDF Noir — Blender hook (v1.0.0).
  *
  * Runs inside the pdf.js viewer realm. Intercepts the fork's image path:
  *
@@ -34,7 +34,7 @@
   var g = typeof window !== "undefined" ? window : globalThis;
   var NS = (g.PDFNoir = g.PDFNoir || {});
 
-  var BUILD = "M3.0";
+  var BUILD = "1.0.0";
   var MAX_PIXELS = 8e6;
   var LOG_CAP = 800;
   var ATTACH_TRIES = 120;
@@ -42,6 +42,10 @@
   // Upstream image identity for the drawImage call currently on the stack,
   // set by the CanvasGraphics paint* wrappers below.
   var drawSource = null;
+  // Active transfer map (a CSS filter string) for the draw currently on the
+  // stack, or null. Same imgData with different transfer maps produces
+  // different pixels, so the caches must not be used while it is set.
+  var drawTransfer = null;
 
   var state = {
     installed: false,
@@ -52,6 +56,7 @@
     generation: 0,
     originals: [],
     attachTimer: null,
+    transferLogged: false,
   };
 
   function log(win, msg) {
@@ -146,7 +151,12 @@
       }
       return;
     }
-    app.pdfDocument
+    var doc = app.pdfDocument;
+    if (typeof doc.getPage !== "function") {
+      log(win, "pdfDocument.getPage is not a function; not hooking");
+      return;
+    }
+    doc
       .getPage(1)
       .then(function (page) {
         if (state.generation !== gen || !state.installed) {
@@ -289,14 +299,24 @@
 
   function makeSourceCapture(orig) {
     return function () {
-      var prev = drawSource;
+      var prevSource = drawSource;
+      var prevTransfer = drawTransfer;
       // both paintInlineImageXObject(opIdx, imgData) and
       // paintInlineImageXObjectGroup(opIdx, imgData, map) carry imgData 2nd
       drawSource = isObj(arguments[1]) ? arguments[1] : null;
+      // CanvasGraphics.current.transferMaps is a string, "none" when unset
+      // (pdf-shipped.mjs:11202); when set, applyTransferMapsToBitmap/Canvas
+      // filter the pixels before they are painted.
+      var cur = this && this.current;
+      drawTransfer =
+        cur && typeof cur.transferMaps === "string" && cur.transferMaps !== "none"
+          ? cur.transferMaps
+          : null;
       try {
         return orig.apply(this, arguments);
       } finally {
-        drawSource = prev;
+        drawSource = prevSource;
+        drawTransfer = prevTransfer;
       }
     };
   }
@@ -327,7 +347,9 @@
           );
         }
       }
-      // The original method is called exactly once, here.
+      // Passthrough / failure fallback: the original method runs at most
+      // once, here. A successful noir hit draws the transformed canvas above
+      // and never reaches this line.
       return orig.call(this, args);
     };
     try {
@@ -496,7 +518,6 @@
     }
 
     var theme = win.theme || {};
-    var bgHex = String(theme.background || "#ffffff");
     var fgHex = String(theme.foreground || "#000000");
 
     // Cache identity: upstream imgData/bitmap when known, else the object
@@ -509,13 +530,24 @@
     var id = NS.cache.imageId(srcObj);
     var srcTag = upstream ? "src=up" : "src=draw";
 
+    // A transfer map filters the pixels the same imgData produces, so the
+    // identity-keyed caches would mix results. This path is rare; recompute
+    // and skip both caches rather than risk cross-talk.
+    var transfer = drawTransfer;
+    if (transfer && !state.transferLogged) {
+      state.transferLogged = true;
+      log(win, "transfer map active (" + transfer + "); cache disabled for those draws");
+    }
+
     var t0 = Date.now();
-    var feats = NS.cache.getFeatures(srcObj, fkey);
+    var feats = transfer ? null : NS.cache.getFeatures(srcObj, fkey);
     var clsMiss = false;
     if (!feats) {
       clsMiss = true;
       feats = NS.classify.classify(win, img, rect);
-      NS.cache.putFeatures(srcObj, fkey, feats);
+      if (!transfer) {
+        NS.cache.putFeatures(srcObj, fkey, feats);
+      }
     }
     var decision = NS.classify.decide(feats, state.sens);
     if (!decision.hit) {
@@ -524,13 +556,14 @@
         win,
         "#" + state.draws + " img" + id + " " + rect.sW + "x" + rect.sH + " " + srcTag +
         " pass cls=" + (clsMiss ? "miss" : "hit") + " " + featsDesc(feats) +
-        " " + thrDesc(decision.thresholds) + " ms=" + (Date.now() - t0)
+        " " + thrDesc(decision.thresholds) + " ms=" + (Date.now() - t0) +
+        (transfer ? " xf=on(cache-off)" : "")
       );
       return null;
     }
 
-    var rkey = NS.cache.resKey(fkey, state.sens, bgHex, fgHex);
-    var res = NS.cache.getResult(srcObj, rkey);
+    var rkey = transfer ? null : NS.cache.resKey(fkey, state.sens, fgHex);
+    var res = transfer ? null : NS.cache.getResult(srcObj, rkey);
     var resMiss = false;
     if (!res) {
       resMiss = true;
@@ -540,18 +573,22 @@
       var octx = off.getContext("2d");
       octx.drawImage(img, rect.sX, rect.sY, rect.sW, rect.sH, 0, 0, rect.sW, rect.sH);
       var idata = octx.getImageData(0, 0, rect.sW, rect.sH);
-      var tr = NS.transform.transformImageData(idata, state.sens, bgHex, fgHex);
+      var tr = NS.transform.transformImageData(idata, state.sens, fgHex);
       octx.putImageData(idata, 0, 0);
       res = { canvas: off, removedFrac: tr.removedFrac };
-      NS.cache.putResult(srcObj, rkey, res);
+      if (!transfer) {
+        NS.cache.putResult(srcObj, rkey, res);
+      }
     }
     state.draws++;
     log(
       win,
       "#" + state.draws + " img" + id + " " + rect.sW + "x" + rect.sH + " " + srcTag +
-      " noir cache=" + (resMiss ? "miss" : "hit") + " cls=" + (clsMiss ? "miss" : "hit") +
+      " noir cache=" + (transfer ? "off" : resMiss ? "miss" : "hit") +
+      " cls=" + (clsMiss ? "miss" : "hit") +
       " " + featsDesc(feats) + " " + thrDesc(decision.thresholds) +
-      " ms=" + (Date.now() - t0) + " removed=" + fmt(res.removedFrac || 0)
+      " ms=" + (Date.now() - t0) + " removed=" + fmt(res.removedFrac || 0) +
+      (transfer ? " xf=on" : "")
     );
     return { canvas: res.canvas, rect: rect };
   }
@@ -576,13 +613,20 @@
     }
     state.originals = [];
     state.installed = false;
+    state.transferLogged = false;
     if (state.attachTimer) {
       try {
         clearTimeout(state.attachTimer);
       } catch (e) {}
       state.attachTimer = null;
     }
+    try {
+      if (NS.cache && typeof NS.cache.clear === "function") {
+        NS.cache.clear();
+      }
+    } catch (e2) {}
     drawSource = null;
+    drawTransfer = null;
     if (win) {
       log(win, "hook uninstalled");
     }

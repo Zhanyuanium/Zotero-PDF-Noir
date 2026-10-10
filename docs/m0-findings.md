@@ -3,6 +3,10 @@
 Status: M0 complete (verified on Zotero 10.0.6, Firefox ESR 140, build 20261007153950).
 All claims below were verified against the shipped bundle, not inferred from upstream docs.
 
+> **Warning:** all pdf.js file/line numbers and function names below refer to the shipped
+> bundle of build `20261007153950` only. After a Zotero upgrade they must be re-verified
+> against the new bundle by symbol name, not by line number.
+
 ## Environment
 
 | Item | Value |
@@ -144,7 +148,11 @@ background.
 | 3 | `/Im2` | 347×203 |
 | 5 | `/Im3` | 2100×2389 (Fig. 3) |
 
-No `/Subtype /Form` XObjects, so all figure content reaches `customDrawImage`.
+No `/Subtype /Form` XObjects were found, so no figure content is hidden inside Form
+XObjects. **Corrected in §8:** this does *not* mean figure content reaches
+`customDrawImage` without vector overlays — the sample's page 2 draws 35 near-black
+vector paths on top of the Fig. 1 bitmap. Those are already mapped to theme-light styles
+by Blender itself, so no vector-layer hook is needed.
 
 ## 6. Design decisions (as implemented)
 

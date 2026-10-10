@@ -1,4 +1,4 @@
-/* Zotero PDF Noir — bootstrap entry (M2.1).
+/* Zotero PDF Noir — bootstrap entry (v1.0.0).
  *
  * Lifecycle: install / startup / shutdown / uninstall (bootstrapped add-on).
  *
@@ -21,7 +21,7 @@
 
 var ADDON_ID = "pdf-noir@zotero-plugins";
 var LOG_PREFIX = "[PDF-Noir]";
-var BUILD = "M3.0";
+var BUILD = "1.0.0";
 var NOIR_FILES = [
   "content/scripts/noir/classify.js",
   "content/scripts/noir/transform.js",
@@ -35,6 +35,11 @@ var _timer = null;
 var _startupTimeout = null;
 var _active = false;
 var _listenerRegistered = false;
+// Throttle for replacing a window that still runs another build: a build that
+// cannot be replaced yet (e.g. the plugin source has not been updated) must not
+// re-inject on every tick.
+var STALE_RETRY_MS = 5000;
+var _staleAttempts = new WeakMap();
 
 function debugLine(line) {
   try {
@@ -169,12 +174,19 @@ function pluginURL(rel) {
   return base + rel;
 }
 
-function hasNoirNS(raw) {
+function noirBuild(raw) {
   try {
-    return !!(raw && raw.PDFNoir && raw.PDFNoir.hook && raw.PDFNoir.hook.BUILD);
+    return raw && raw.PDFNoir && raw.PDFNoir.hook
+      ? String(raw.PDFNoir.hook.BUILD || "")
+      : null;
   } catch (e) {
-    return false;
+    return null;
   }
+}
+
+/** True only for the exact build this bootstrap ships. */
+function hasNoirNS(raw) {
+  return noirBuild(raw) === BUILD;
 }
 
 function callHook(raw, method, a1, a2, a3) {
@@ -198,6 +210,38 @@ function registerWin(raw) {
   _injectedWins.push(raw);
 }
 
+/**
+ * A reader that stayed open across an upgrade still runs the old code. Tear it
+ * down and drop the namespace so the caller can inject the current build; never
+ * accept a different build as "already injected".
+ *
+ * Throttled per window: a build that cannot be replaced yet is retried quietly
+ * instead of piling up injections (and log lines) on every tick.
+ *
+ * @returns {boolean} false when this build was already attempted moments ago
+ */
+function replaceStaleBuild(raw, staleBuild) {
+  var now = Date.now();
+  var prev = _staleAttempts.get(raw);
+  if (prev && prev.build === staleBuild && now - prev.at < STALE_RETRY_MS) {
+    return false;
+  }
+  _staleAttempts.set(raw, { build: staleBuild, at: now });
+  if (!prev || prev.build !== staleBuild) {
+    log("stale PDFNoir build=" + staleBuild + " (expected " + BUILD + "); replacing");
+  }
+  try {
+    callHook(raw, "uninstall");
+  } catch (e) {}
+  try {
+    delete raw.PDFNoir;
+  } catch (e) {}
+  try {
+    delete raw.__PDFNoirLogs;
+  } catch (e) {}
+  return true;
+}
+
 function ensureInjected(win) {
   var raw = rawWin(win);
   if (!raw) {
@@ -213,6 +257,17 @@ function ensureInjected(win) {
       callHook(raw, "install", raw, prefs.sensitivity, prefs.enable);
     }
     return true;
+  }
+  var staleBuild = noirBuild(raw);
+  if (staleBuild) {
+    if (!replaceStaleBuild(raw, staleBuild)) {
+      return false; // tried a moment ago; retry on a later tick
+    }
+    for (var k = _injectedWins.length - 1; k >= 0; k--) {
+      if (_injectedWins[k] === raw) {
+        _injectedWins.splice(k, 1);
+      }
+    }
   }
   var urls = [];
   for (var i = 0; i < NOIR_FILES.length; i++) {
@@ -337,16 +392,17 @@ function tick() {
     }
     if (!alive) {
       try {
-        if (raw && hasNoirNS(raw)) {
+        if (raw && noirBuild(raw)) {
           callHook(raw, "uninstall");
         }
       } catch (e2) {}
       _injectedWins.splice(k, 1);
       continue;
     }
-    if (!hasNoirNS(raw)) {
-      // Viewer navigated/reloaded: the old document's globals are gone.
-      // Discovery will inject into the new document.
+    if (noirBuild(raw) !== BUILD) {
+      // Viewer navigated/reloaded (no namespace left), or the window still runs
+      // another build. Drop the registration; discovery replaces the stale
+      // build via ensureInjected (which uninstalls it before re-injecting).
       _injectedWins.splice(k, 1);
       continue;
     }
@@ -468,7 +524,9 @@ function shutdown(_data, _reason) {
   for (var i = 0; i < _injectedWins.length; i++) {
     var raw = _injectedWins[i];
     try {
-      if (raw && !raw.closed && hasNoirNS(raw)) {
+      // Any build: a window left with stale code from a previous version must
+      // be torn down too.
+      if (raw && !raw.closed && noirBuild(raw)) {
         callHook(raw, "uninstall");
       }
     } catch (e) {}

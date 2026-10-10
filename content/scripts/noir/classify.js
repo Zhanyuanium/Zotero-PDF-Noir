@@ -1,4 +1,4 @@
-/* Zotero PDF Noir — classification (M2).
+/* Zotero PDF Noir — classification (v1.0.0).
  *
  * Runs inside the pdf.js viewer realm (injected by bootstrap.js). Decides
  * whether a raster image is "white-background line art" that the noir
@@ -8,14 +8,18 @@
  * the transform itself always runs at the original resolution so thin
  * strokes are preserved.
  *
- * Features (all 0..1):
+ * Features (all 0..1, computed over opaque pixels only):
  *   nearWhite  - fraction of pixels with lightness > 0.94 and relative
  *                saturation < 0.1
  *   lowSat     - fraction of pixels that are neutral: absolute channel
  *                spread <= 32 or relative saturation < 0.2
- *   flat       - fraction of adjacent pixel pairs with max channel
+ *   flat       - fraction of adjacent opaque pixel pairs with max channel
  *                difference <= 12 (Blender's deviation convention)
  *   darkNeutral - fraction of pixels with L < 0.5 and neutral color
+ *
+ * Transparent pixels are excluded from every denominator, and a flat pair is
+ * only counted when both of its pixels are opaque, so a transparent margin
+ * cannot skew the ratios.
  *
  * Decision thresholds derive from the sensitivity pref s (0..1):
  *   tNearWhite = 0.45 - 0.27*s
@@ -32,16 +36,13 @@
   var LONG_SIDE = 192;
   var FLAT_TOL = 12;
   var NEUTRAL_SPREAD = 32;
-
-  function clamp01(v) {
-    return v < 0 ? 0 : v > 1 ? 1 : v;
-  }
+  var ALPHA_MIN = 32;
 
   function featuresFromImageData(imageData) {
     var data = imageData.data;
     var w = imageData.width;
     var h = imageData.height;
-    var n = w * h;
+    var valid = 0;
     var nearWhite = 0;
     var lowSat = 0;
     var darkNeutral = 0;
@@ -50,9 +51,10 @@
     for (var y = 0; y < h; y++) {
       for (var x = 0; x < w; x++) {
         var p = (y * w + x) * 4;
-        if (data[p + 3] < 32) {
-          continue;
+        if (data[p + 3] < ALPHA_MIN) {
+          continue; // transparent: not a valid pixel
         }
+        valid++;
         var r = data[p];
         var gg = data[p + 1];
         var b = data[p + 2];
@@ -72,33 +74,38 @@
         }
         if (x + 1 < w) {
           var q = p + 4;
-          totalPairs++;
-          if (
-            Math.abs(r - data[q]) <= FLAT_TOL &&
-            Math.abs(gg - data[q + 1]) <= FLAT_TOL &&
-            Math.abs(b - data[q + 2]) <= FLAT_TOL
-          ) {
-            flatPairs++;
+          if (data[q + 3] >= ALPHA_MIN) {
+            totalPairs++;
+            if (
+              Math.abs(r - data[q]) <= FLAT_TOL &&
+              Math.abs(gg - data[q + 1]) <= FLAT_TOL &&
+              Math.abs(b - data[q + 2]) <= FLAT_TOL
+            ) {
+              flatPairs++;
+            }
           }
         }
         if (y + 1 < h) {
           var q2 = p + w * 4;
-          totalPairs++;
-          if (
-            Math.abs(r - data[q2]) <= FLAT_TOL &&
-            Math.abs(gg - data[q2 + 1]) <= FLAT_TOL &&
-            Math.abs(b - data[q2 + 2]) <= FLAT_TOL
-          ) {
-            flatPairs++;
+          if (data[q2 + 3] >= ALPHA_MIN) {
+            totalPairs++;
+            if (
+              Math.abs(r - data[q2]) <= FLAT_TOL &&
+              Math.abs(gg - data[q2 + 1]) <= FLAT_TOL &&
+              Math.abs(b - data[q2 + 2]) <= FLAT_TOL
+            ) {
+              flatPairs++;
+            }
           }
         }
       }
     }
     return {
-      nearWhite: n ? nearWhite / n : 0,
-      lowSat: n ? lowSat / n : 0,
+      valid: valid,
+      nearWhite: valid ? nearWhite / valid : 0,
+      lowSat: valid ? lowSat / valid : 0,
       flat: totalPairs ? flatPairs / totalPairs : 0,
-      darkNeutral: n ? darkNeutral / n : 0,
+      darkNeutral: valid ? darkNeutral / valid : 0,
     };
   }
 

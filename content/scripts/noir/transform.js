@@ -1,4 +1,4 @@
-/* Zotero PDF Noir — pixel transform (M3).
+/* Zotero PDF Noir — pixel transform (v1.0.0).
  *
  * Runs inside the pdf.js viewer realm. Pure typed-array pixel work on the
  * ImageData of the source rect, at original resolution, single pass.
@@ -8,16 +8,20 @@
  * width, the same ramp shape and the same chromatic gate. The two ends get
  * the two symmetric effects:
  *
- *   near-white end -> remove:  alpha = 255 * (1 - wWhite)
+ *   near-white end -> remove:  alpha = alpha * (1 - wWhite)
  *   near-black end -> flip:    rgb   = mix(rgb, flipped, wDark)
  *
  * `flipped` is the mirror of the pixel's lightness (L -> 1 - L) placed on the
- * theme foreground -> white axis, so the darkest ink lands on the theme
- * foreground and pure black approaches white — the mirror of the near-white
- * end becoming the theme background. The middle of the axis is untouched.
+ * theme foreground -> white axis: `flipped = fg + (255 - fg) * (1 - L)`, so
+ * pure black becomes (nearly) white and the darkest ink is the lightest
+ * output — the mirror of the near-white end becoming the theme background.
+ * The middle of the axis is untouched.
  *
- * Chromatic pixels (absolute channel spread >= neutralSpread) are never
- * modified. All thresholds derive from the sensitivity pref s (0..1).
+ * Chromatic pixels are never modified. The decision uses a *relative* chroma
+ * (see CHROMA_FLOOR), not the absolute channel spread: a dark saturated
+ * colour like (40,0,0) has a small spread but is fully saturated, and an
+ * absolute gate would wrongly flip it. All thresholds derive from the
+ * sensitivity pref s (0..1).
  *
  * The figure's content is baked into the bitmap (lines, labels, satellite
  * icons, ...) and goes through this transform. If the PDF also draws vector
@@ -33,16 +37,32 @@
   var g = typeof window !== "undefined" ? window : globalThis;
   var NS = (g.PDFNoir = g.PDFNoir || {});
 
+  // Denominator floor for the relative chroma. Without it, JPEG chroma noise
+  // on near-black ink (max channel ~10) would produce a high ratio and the
+  // ink would stop being flipped; with it, a pixel must exceed both a minimum
+  // absolute spread and the relative threshold to count as coloured.
+  var CHROMA_FLOOR = 32;
+
   function clamp01(v) {
     return v < 0 ? 0 : v > 1 ? 1 : v;
   }
 
   /**
    * Shared neutral-band parameters, derived from sensitivity s (0..1).
+   *
    * The band is mirror-symmetric around L = 0.5:
    *   white: [whiteLo, whiteHi]   (alpha ramp)
    *   black: [darkLo, darkHi]     with darkLo = 1 - whiteHi, darkHi = 1 - whiteLo
    * Defaults (s = 0.7): white [0.768, 0.934], black [0.066, 0.232].
+   *
+   *   chromaT      - relative chroma gate; a pixel at or above it is treated
+   *                  as coloured and left alone. Grows with s (more
+   *                  aggressive = more colours accepted as neutral); bounded
+   *                  by construction to 0.30, far below the chroma of any
+   *                  clearly saturated colour, so raising s can never disable
+   *                  colour protection.
+   *   neutralSpread - width of the absolute-spread weight ramp (how quickly a
+   *                  neutral pixel reaches full effect as its spread drops).
    */
   function params(s) {
     var whiteLo = 0.88 - 0.16 * s;
@@ -52,6 +72,7 @@
       whiteHi: whiteHi,
       darkHi: 1 - whiteLo,
       darkLo: 1 - whiteHi,
+      chromaT: 0.2 + 0.1 * s,
       neutralSpread: 40 + 24 * s,
     };
   }
@@ -76,41 +97,42 @@
    * @param {number} r @param {number} g @param {number} b 0..255
    * @param {object} P params(s)
    * @param {number[]} fg theme foreground rgb (0..255)
-   * @returns {?{L:number, wWhite:number, wDark:number, flip:number[]}}
-   *   null for chromatic colours (absolute spread gate)
+   * @returns {?{L:number, chroma:number, wWhite:number, wDark:number, flip:number[]}}
+   *   null for chromatic colours (relative chroma gate)
    */
   function neutralEval(r, g, b, P, fg) {
     var mx = r > g ? (r > b ? r : b) : g > b ? g : b;
     var mn = r < g ? (r < b ? r : b) : g < b ? g : b;
     var spread = mx - mn;
-    if (spread >= P.neutralSpread) {
-      return null; // chromatic -> untouched
+    var denom = mx > CHROMA_FLOOR ? mx : CHROMA_FLOOR;
+    var chroma = spread / denom;
+    if (chroma >= P.chromaT) {
+      return null; // coloured -> untouched
     }
-    var wSat = (P.neutralSpread - spread) / P.neutralSpread;
+    var wSat = clamp01((P.neutralSpread - spread) / P.neutralSpread);
     var L = (2126 * r + 7152 * g + 722 * b) / 2550000;
 
     var wWhite = clamp01((L - P.whiteLo) / (P.whiteHi - P.whiteLo)) * wSat;
     var wDark = clamp01((P.darkHi - L) / (P.darkHi - P.darkLo)) * wSat;
 
     // Flipped colour: the mirror of the lightness (1 - L) on the
-    // foreground -> white axis.
+    // foreground -> white axis (pure black -> white).
     var Lf = 1 - L;
     var flip = [
       fg[0] + (255 - fg[0]) * Lf,
       fg[1] + (255 - fg[1]) * Lf,
       fg[2] + (255 - fg[2]) * Lf,
     ];
-    return { L: L, wWhite: wWhite, wDark: wDark, flip: flip };
+    return { L: L, chroma: chroma, wWhite: wWhite, wDark: wDark, flip: flip };
   }
 
   /**
    * @param {ImageData} imageData source rect at original resolution (mutated in place)
    * @param {number} s sensitivity 0..1
-   * @param {string} bgHex theme background (unused by the transform, kept for API symmetry)
    * @param {string} fgHex theme foreground
    * @returns {{removedFrac:number}}
    */
-  function transformImageData(imageData, s, bgHex, fgHex) {
+  function transformImageData(imageData, s, fgHex) {
     var P = params(s);
     var fg = hexToRgb(fgHex);
     var data = imageData.data;
@@ -125,7 +147,7 @@
       var b = data[p + 2];
       var e = neutralEval(r, gg, b, P, fg);
       if (!e) {
-        continue; // chromatic
+        continue; // coloured
       }
 
       // near-white end: remove
@@ -136,7 +158,7 @@
         }
       }
 
-      // near-black end: flip the lightness toward the foreground
+      // near-black end: flip the lightness toward white
       if (e.wDark > 0) {
         var wd = e.wDark;
         data[p] = r + (e.flip[0] - r) * wd;

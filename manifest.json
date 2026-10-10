@@ -1,14 +1,14 @@
 {
   "manifest_version": 2,
   "name": "Zotero PDF Noir",
-  "version": "0.1.0",
-  "description": "Dark-mode image handling for the Zotero PDF reader: white-background line art is made transparent, neutral ink is lifted to the theme foreground, colors are preserved.",
-  "homepage_url": "https://github.com/example/Zotero-PDF-Noir",
+  "version": "1.0.0",
+  "description": "Dark-mode image handling for the Zotero PDF reader: white-background line art is made transparent, neutral near-black ink is flipped to light, colors are preserved.",
+  "homepage_url": "https://github.com/Zhanyuanium/Zotero-PDF-Noir",
   "applications": {
     "zotero": {
       "id": "pdf-noir@zotero-plugins",
-      "update_url": "https://github.com/example/Zotero-PDF-Noir/releases/download/release/update.json",
-      "strict_min_version": "6.999",
+      "update_url": "https://github.com/Zhanyuanium/Zotero-PDF-Noir/releases/latest/download/update.json",
+      "strict_min_version": "10.0.6",
       "strict_max_version": "10.0.*"
     }
   }
