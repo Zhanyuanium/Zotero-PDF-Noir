@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero PDF Noir",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Dark-mode image handling for the Zotero PDF reader: white-background line art is made transparent, neutral near-black ink is flipped to light, colors are preserved.",
   "homepage_url": "https://github.com/Zhanyuanium/Zotero-PDF-Noir",
   "applications": {

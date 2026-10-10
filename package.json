@@ -1,6 +1,6 @@
 {
   "name": "zotero-pdf-noir",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Zotero PDF Noir plugin: dark-mode PDF image handling for the Zotero reader",
