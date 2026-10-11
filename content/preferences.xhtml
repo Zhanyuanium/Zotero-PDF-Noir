@@ -1,0 +1,64 @@
+<vbox id="zotero-prefpane-pdf-noir" onload="PDFNoir_Preferences.init()">
+  <linkset>
+    <html:link rel="localization" href="pdf-noir-preferences.ftl"/>
+  </linkset>
+  <vbox class="main-section">
+    <checkbox id="pdfnoir-enable"
+              preference="extensions.pdf-noir.enable"
+              data-l10n-id="pdfnoir-prefs-enable"/>
+    <description data-l10n-id="pdfnoir-prefs-intro"/>
+
+    <groupbox aria-labelledby="pdfnoir-neutral-heading">
+      <html:h2 id="pdfnoir-neutral-heading" data-l10n-id="pdfnoir-prefs-neutral-heading"/>
+      <hbox align="center">
+        <label id="pdfnoir-chroma-label" control="pdfnoir-chroma-threshold"
+               data-l10n-id="pdfnoir-prefs-chroma-label" style="min-width: 12em;"/>
+        <html:input id="pdfnoir-chroma-threshold" type="range"
+                    min="0" max="1" step="0.01"
+                    preference="extensions.pdf-noir.chromaThreshold"
+                    aria-labelledby="pdfnoir-chroma-label"
+                    aria-describedby="pdfnoir-chroma-help"
+                    style="flex: 1; min-width: 0;"/>
+        <html:span id="pdfnoir-chroma-threshold-value" aria-hidden="true"
+                   style="width: 4.5em; text-align: end; font-variant-numeric: tabular-nums;"/>
+      </hbox>
+      <description id="pdfnoir-chroma-help" data-l10n-id="pdfnoir-prefs-chroma-help"/>
+
+      <hbox align="center">
+        <label id="pdfnoir-band-label" control="pdfnoir-band-width"
+               data-l10n-id="pdfnoir-prefs-band-label" style="min-width: 12em;"/>
+        <html:input id="pdfnoir-band-width" type="range"
+                    min="0" max="1" step="0.01"
+                    preference="extensions.pdf-noir.bandWidth"
+                    aria-labelledby="pdfnoir-band-label"
+                    aria-describedby="pdfnoir-band-help"
+                    style="flex: 1; min-width: 0;"/>
+        <html:span id="pdfnoir-band-width-value" aria-hidden="true"
+                   style="width: 4.5em; text-align: end; font-variant-numeric: tabular-nums;"/>
+      </hbox>
+      <description id="pdfnoir-band-help" data-l10n-id="pdfnoir-prefs-band-help"/>
+    </groupbox>
+
+    <groupbox aria-labelledby="pdfnoir-detection-heading">
+      <html:h2 id="pdfnoir-detection-heading" data-l10n-id="pdfnoir-prefs-detection-heading"/>
+      <hbox align="center">
+        <label id="pdfnoir-class-label" control="pdfnoir-class-sensitivity"
+               data-l10n-id="pdfnoir-prefs-class-label" style="min-width: 12em;"/>
+        <html:input id="pdfnoir-class-sensitivity" type="range"
+                    min="0" max="1" step="0.01"
+                    preference="extensions.pdf-noir.classSensitivity"
+                    aria-labelledby="pdfnoir-class-label"
+                    aria-describedby="pdfnoir-class-help"
+                    style="flex: 1; min-width: 0;"/>
+        <html:span id="pdfnoir-class-sensitivity-value" aria-hidden="true"
+                   style="width: 4.5em; text-align: end; font-variant-numeric: tabular-nums;"/>
+      </hbox>
+      <description id="pdfnoir-class-help" data-l10n-id="pdfnoir-prefs-class-help"/>
+    </groupbox>
+
+    <hbox>
+      <button id="pdfnoir-reset" data-l10n-id="pdfnoir-prefs-reset"
+              oncommand="PDFNoir_Preferences.reset()"/>
+    </hbox>
+  </vbox>
+</vbox>

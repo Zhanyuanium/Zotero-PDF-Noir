@@ -4,8 +4,11 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { loadNoir } from "./helpers.js";
 
-const NS = loadNoir(["cache.js"]);
+// transform.js is loaded alongside so resKey is exercised with the exact
+// params object transformImageData receives.
+const NS = loadNoir(["transform.js", "cache.js"]);
 const C = NS.cache;
+const T = NS.transform;
 
 const rect = { sX: 10, sY: 20, sW: 30, sH: 40 };
 
@@ -22,28 +25,42 @@ describe("keys", () => {
     );
   });
 
-  test("resKey covers sensitivity and foreground, not the background", () => {
+  test("resKey covers the source rect, the transform params and the foreground", () => {
     const fkey = C.featKey(rect, 100, 200);
-    expect(C.resKey(fkey, 0.7, "#d8dee9")).toBe(C.resKey(fkey, 0.7, "#d8dee9"));
-    expect(C.resKey(fkey, 0.7, "#d8dee9")).not.toBe(
-      C.resKey(fkey, 0.8, "#d8dee9")
+    const P = T.params({ chromaT: 1.0, bandWidth: 0.6 });
+    // Two INDEPENDENTLY constructed params objects with equal values must
+    // produce the same key: the key depends on values, not object identity.
+    const P2 = T.params({ chromaT: 1.0, bandWidth: 0.6 });
+    expect(P2).not.toBe(P); // sanity: these really are distinct objects
+    expect(C.resKey(fkey, P, "#d8dee9")).toBe(C.resKey(fkey, P2, "#d8dee9"));
+    // A different source rect must not reuse the same result canvas: two
+    // rects of one image are different pixels and therefore different keys.
+    const otherFkey = C.featKey({ ...rect, sX: 11 }, 100, 200);
+    expect(C.resKey(fkey, P, "#d8dee9")).not.toBe(C.resKey(otherFkey, P, "#d8dee9"));
+    // A different chroma gate or band width -> different key (exact check,
+    // not just "different sensitivity"): the canvas would differ.
+    expect(C.resKey(fkey, P, "#d8dee9")).not.toBe(
+      C.resKey(fkey, T.params({ chromaT: 0.9, bandWidth: 0.6 }), "#d8dee9")
     );
-    expect(C.resKey(fkey, 0.7, "#d8dee9")).not.toBe(
-      C.resKey(fkey, 0.7, "#ffffff")
+    expect(C.resKey(fkey, P, "#d8dee9")).not.toBe(
+      C.resKey(fkey, T.params({ chromaT: 1.0, bandWidth: 0.5 }), "#d8dee9")
+    );
+    expect(C.resKey(fkey, P, "#d8dee9")).not.toBe(
+      C.resKey(fkey, P, "#ffffff")
     );
   });
 });
 
 describe("entries", () => {
-  test("features survive a sensitivity change (key has no sensitivity)", () => {
+  test("features survive a transform-param change (key has no params)", () => {
     const obj = {};
     const fkey = C.featKey(rect, 100, 200);
     const feats = { nearWhite: 0.9, lowSat: 1, flat: 0.9, darkNeutral: 0.1 };
     C.putFeatures(obj, fkey, feats);
     expect(C.getFeatures(obj, fkey)).toBe(feats);
-    // A different sensitivity only changes the result key, not the features.
-    const r1 = C.resKey(fkey, 0.7, "#d8dee9");
-    const r2 = C.resKey(fkey, 0.9, "#d8dee9");
+    // A different band only changes the result key, not the features.
+    const r1 = C.resKey(fkey, T.params({ chromaT: 1.0, bandWidth: 0.6 }), "#d8dee9");
+    const r2 = C.resKey(fkey, T.params({ chromaT: 1.0, bandWidth: 0.5 }), "#d8dee9");
     expect(r1).not.toBe(r2);
     C.putResult(obj, r1, { canvas: { width: 4, height: 4 }, removedFrac: 1 });
     expect(C.getResult(obj, r1)).not.toBeNull();

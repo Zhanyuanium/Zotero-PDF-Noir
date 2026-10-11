@@ -1,15 +1,17 @@
-/* Zotero PDF Noir — result caches (v1.0.0).
+/* Zotero PDF Noir — result caches (v1.1.0).
  *
  * Two caches, both keyed by the *upstream* image identity (the pdf.js
  * imgData object or its bitmap — not the temporary canvas `_scaleImage`
  * creates per render), plus the source rect and the source's pixel size:
  *
- *  - features cache: classification features. Independent of sensitivity
- *    and theme colors, so a pref change does not invalidate it.
+ *  - features cache: classification features. Independent of the transform
+ *    params and theme colors, so neither a classification-sensitivity nor a
+ *    chroma/band change invalidates it.
  *  - result cache: the transformed canvas for a noir hit. Keyed by the
- *    features key plus sensitivity and the theme foreground colour (the
- *    background colour does not influence the output, so it is not part of
- *    the key).
+ *    features key plus the ACTUAL transform params and the theme foreground
+ *    colour (the background colour does not influence the output, so it is
+ *    not part of the key). Classification sensitivity is deliberately absent:
+ *    the transformed canvas does not depend on it.
  *
  * Repeated renders of the same figure (scroll, repaint) hit the caches;
  * zoom changes produce a different rect and therefore a new entry.
@@ -61,9 +63,13 @@
     );
   }
 
-  /** Key for parameter-dependent data (transformed canvas). */
-  function resKey(fkey, sens, fgHex) {
-    return fkey + "|s=" + sens + "|fg=" + fgHex;
+  /**
+   * Key for parameter-dependent data (transformed canvas). Built from the
+   * exact params the transform consumed, so any knob a user can change
+   * produces a different key (whiteHi - whiteLo is the band width).
+   */
+  function resKey(fkey, P, fgHex) {
+    return fkey + "|c=" + P.chromaT + "|w=" + (P.whiteHi - P.whiteLo) + "|fg=" + fgHex;
   }
 
   function entrySize(store, entry) {

@@ -1,4 +1,4 @@
-/* Zotero PDF Noir — classification (v1.0.0).
+/* Zotero PDF Noir — classification (v1.1.0).
  *
  * Runs inside the pdf.js viewer realm (injected by bootstrap.js). Decides
  * whether a raster image is "white-background line art" that the noir
@@ -21,7 +21,10 @@
  * only counted when both of its pixels are opaque, so a transparent margin
  * cannot skew the ratios.
  *
- * Decision thresholds derive from the sensitivity pref s (0..1):
+ * Decision thresholds derive from the classification sensitivity s (0..1),
+ * which now comes solely from `extensions.pdf-noir.classSensitivity` and
+ * affects this module only — the pixel transform is parameterized separately
+ * (chroma gate / band width) and no longer depends on s:
  *   tNearWhite = 0.45 - 0.27*s
  *   tLowSat    = 0.75 - 0.25*s
  *   tFlat      = 0.55 - 0.25*s

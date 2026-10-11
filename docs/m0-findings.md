@@ -41,8 +41,8 @@ Required shape:
 
 > `strict_max_version` was later widened from `10.0.*` to `10.*` at release
 > time: a `10.0.*` ceiling would have locked every user out of updates the
-> moment Zotero 10.1 shipped. `strict_min_version` remains `10.0.6`, the only
-> release the plugin was actually verified against.
+> moment Zotero 10.1 shipped. `strict_min_version` was lowered from `10.0.6` to
+> `10.0.0` for the 1.1.0 release; live testing was still done on `10.0.6`.
 
 `onMainWindowLoad` / `onMainWindowUnload` must exist (even as no-ops) or Zotero logs a
 warning on every window open.
@@ -143,9 +143,11 @@ That is exactly the reported defect: the white background survives (dimmed by al
 dark line work on it is not inverted and remains effectively invisible on the dark
 background.
 
-## 5. Sample PDF (M1 test fixture)
+## 5. Test fixture PDF
 
-`samples/Dual-Grained_Recursive_Bayesian_Filtering_...pdf`, 6 pages, three raster images:
+A six-page paper was used as the fixture during development. It is a
+third-party document and is not redistributed with this repository, so it is
+described here rather than shipped. Its three raster images were:
 
 | Page | Object | Size |
 | --- | --- | --- |
@@ -182,7 +184,8 @@ proposal are noted.
   (fills, baked-in text). The product decision for M2 is the opposite: **every** near-white
   neutral pixel is removed globally, with no connectivity test and no interior exception;
   all neutral ink (including ink that sat on white fills) is lifted to the foreground.
-  Saturated pixels still keep their original RGB. Alpha removal uses a smooth
+  Saturated pixels still keep their original RGB (the gate's shipped 1.1.0
+  semantics are in [neutral-band.md](neutral-band.md)). Alpha removal uses a smooth
   lightness/saturation weight, so antialiased edges fade rather than getting a hard halo.
 - **Caching:** per upstream image identity (the pdf.js `imgData`/bitmap recorded by
   wrapping `CanvasGraphics.paintInlineImageXObject[Group]` — *not* the temporary canvas

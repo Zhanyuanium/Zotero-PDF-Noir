@@ -1,0 +1,16 @@
+pdfnoir-prefs-enable =
+    .label = 让深色背景上的插图更易阅读
+pdfnoir-prefs-intro = 适用于 PDF 阅读器中的白底线条图。
+pdfnoir-prefs-neutral-heading = 中性墨迹
+pdfnoir-prefs-chroma-label =
+    .value = 中性色阈值
+pdfnoir-prefs-chroma-help = 数值越高，彩色保护越弱。
+pdfnoir-prefs-band-label =
+    .value = 亮度带宽
+pdfnoir-prefs-band-help = 亮度带宽越大，中间调像素也会被处理。
+pdfnoir-prefs-detection-heading = 检测
+pdfnoir-prefs-class-label =
+    .value = 检测灵敏度
+pdfnoir-prefs-class-help = 数值越高，越多图片会被视为白底线条图。
+pdfnoir-prefs-reset =
+    .label = 恢复默认

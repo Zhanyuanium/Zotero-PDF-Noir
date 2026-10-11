@@ -1,11 +1,13 @@
-/* Zotero PDF Noir — bootstrap entry (v1.0.0).
+/* Zotero PDF Noir — bootstrap entry (v1.1.0).
  *
  * Lifecycle: install / startup / shutdown / uninstall (bootstrapped add-on).
  *
  * Responsibilities:
  *  - find the pdf.js viewer windows of open readers,
  *  - inject content/scripts/noir/*.js into the viewer realm,
- *  - install the Blender hook with the current prefs,
+ *  - install the Blender hook with the current prefs (classification
+ *    sensitivity, chroma gate, band width, master switch),
+ *  - register the settings pane (content/preferences.xhtml),
  *  - drain hook log lines into the Zotero debug log ([PDF-Noir] prefix).
  *
  * The viewer realm is the nested iframe (pdf/web/viewer.html) inside the
@@ -21,13 +23,37 @@
 
 var ADDON_ID = "pdf-noir@zotero-plugins";
 var LOG_PREFIX = "[PDF-Noir]";
-var BUILD = "1.0.0";
+var BUILD = "1.1.0";
 var NOIR_FILES = [
   "content/scripts/noir/classify.js",
   "content/scripts/noir/transform.js",
   "content/scripts/noir/cache.js",
   "content/scripts/noir/hook.js"
 ];
+// Pref clamp bounds (applied in getPrefs); same ranges as the settings pane.
+// bandWidth runs 0..1. The two ramps of the mirror-symmetric neutral band
+// share that width; they reach L = 0.5 at 0.434 and their weights then sum to
+// (1 - 2*inner) / bandWidth = 2 - 0.868/bandWidth wherever both are active.
+// The shipped default (0.6) sits in this overlapping regime: mid-tone pixels
+// receive both the white end's alpha reduction and the dark end's flip, while
+// the sum stays <= 1. Above 0.868 the sum exceeds 1 and a mid-tone gets both
+// effects past one full pass — the deliberate "maximum aggressiveness" end of
+// the range, not a malfunction; darkHi (= 1 - inner) also leaves the physical
+// 0..1 range there, harmless because clamp01 bounds each weight individually.
+// chromaT is clamped to 0..1: the shipped default (1.0) protects only
+// exactly-saturated colours (spread === max channel, e.g. (255,0,0)), so
+// mid-saturation colours are treated as neutral — protection at that level is
+// the user's choice via lowering the gate; 0 treats every pixel as coloured,
+// which turns the transform into a complete no-op. Both endpoints are
+// degenerate but graceful. The clamps apply at read time, not only in the
+// settings UI, so a value hand-edited in the Config Editor cannot exceed the
+// slider range.
+var CLASS_SENS_MIN = 0;
+var CLASS_SENS_MAX = 1;
+var CHROMA_T_MIN = 0;
+var CHROMA_T_MAX = 1.0;
+var BAND_WIDTH_MIN = 0;
+var BAND_WIDTH_MAX = 1.0;
 
 var _rootURI = null;
 var _injectedWins = [];
@@ -35,6 +61,11 @@ var _timer = null;
 var _startupTimeout = null;
 var _active = false;
 var _listenerRegistered = false;
+var _paneID = "zotero-prefpane-pdf-noir";
+// Signature of the render-affecting prefs at the last tick: when it changes,
+// the injected windows get an immediate repaint (their on-screen canvases
+// keep stale pixels until the next natural render otherwise).
+var _lastPrefsSig = null;
 // Throttle for replacing a window that still runs another build: a build that
 // cannot be replaced yet (e.g. the plugin source has not been updated) must not
 // re-inject on every tick.
@@ -59,21 +90,53 @@ function log() {
 
 // ---- prefs ---------------------------------------------------------------
 
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function readFloatPref(key, fallback, lo, hi) {
+  try {
+    var raw = Zotero.Prefs.get(key, true);
+    var n = typeof raw === "number" ? raw : parseFloat(raw);
+    if (isFinite(n)) {
+      return clamp(n, lo, hi);
+    }
+  } catch (err) {}
+  return fallback;
+}
+
 function getPrefs() {
-  var out = { enable: true, sensitivity: 0.7, devAutoOpenItem: 0 };
+  var out = {
+    enable: true,
+    classSensitivity: 0.7,
+    chromaT: 1.0,
+    bandWidth: 0.6,
+    devAutoOpenItem: 0,
+  };
   try {
     var e = Zotero.Prefs.get("extensions.pdf-noir.enable", true);
     if (typeof e === "boolean") {
       out.enable = e;
     }
   } catch (err) {}
-  try {
-    var s = Zotero.Prefs.get("extensions.pdf-noir.sensitivity", true);
-    var n = typeof s === "number" ? s : parseFloat(s);
-    if (isFinite(n)) {
-      out.sensitivity = Math.min(1, Math.max(0, n));
-    }
-  } catch (err) {}
+  out.classSensitivity = readFloatPref(
+    "extensions.pdf-noir.classSensitivity",
+    out.classSensitivity,
+    CLASS_SENS_MIN,
+    CLASS_SENS_MAX
+  );
+  out.chromaT = readFloatPref(
+    "extensions.pdf-noir.chromaThreshold",
+    out.chromaT,
+    CHROMA_T_MIN,
+    CHROMA_T_MAX
+  );
+  out.bandWidth = readFloatPref(
+    "extensions.pdf-noir.bandWidth",
+    out.bandWidth,
+    BAND_WIDTH_MIN,
+    BAND_WIDTH_MAX
+  );
   try {
     var d = Zotero.Prefs.get("extensions.pdf-noir.devAutoOpenItem", true);
     var dn = typeof d === "number" ? d : parseInt(d, 10);
@@ -82,6 +145,11 @@ function getPrefs() {
     }
   } catch (err) {}
   return out;
+}
+
+/** Signature of the prefs that affect rendering; drives the repaint check. */
+function prefSig(prefs) {
+  return [prefs.classSensitivity, prefs.chromaT, prefs.bandWidth, prefs.enable].join("/");
 }
 
 // ---- reader / viewer discovery --------------------------------------------
@@ -189,12 +257,12 @@ function hasNoirNS(raw) {
   return noirBuild(raw) === BUILD;
 }
 
-function callHook(raw, method, a1, a2, a3) {
+function callHook(raw, method, a1, a2, a3, a4, a5) {
   try {
     var hook = raw.PDFNoir.hook;
     // Direct call: content code cannot read properties of chrome objects
     // (e.g. an array's .length via apply), so pass primitives only.
-    return hook[method](a1, a2, a3);
+    return hook[method](a1, a2, a3, a4, a5);
   } catch (e) {
     log("hook." + method + " failed: " + (e && e.message ? e.message : e));
     return null;
@@ -254,7 +322,7 @@ function ensureInjected(win) {
     // keep reaching this window.
     registerWin(raw);
     if (callHook(raw, "isInstalled") !== true) {
-      callHook(raw, "install", raw, prefs.sensitivity, prefs.enable);
+      callHook(raw, "install", raw, prefs.classSensitivity, prefs.chromaT, prefs.bandWidth, prefs.enable);
     }
     return true;
   }
@@ -332,7 +400,7 @@ function ensureInjected(win) {
 
   if (hasNoirNS(raw)) {
     registerWin(raw);
-    callHook(raw, "install", raw, prefs.sensitivity, prefs.enable);
+    callHook(raw, "install", raw, prefs.classSensitivity, prefs.chromaT, prefs.bandWidth, prefs.enable);
     return true;
   }
   return false;
@@ -406,8 +474,18 @@ function tick() {
       _injectedWins.splice(k, 1);
       continue;
     }
-    callHook(raw, "setPrefs", prefs.sensitivity, prefs.enable);
+    callHook(raw, "setPrefs", prefs.classSensitivity, prefs.chromaT, prefs.bandWidth, prefs.enable);
     drainLogs(raw);
+  }
+  // A pref change must show up immediately: on-screen canvases (and the
+  // result cache) keep the old pixels until the next natural render, which
+  // for a static page may never come.
+  var psig = prefSig(prefs);
+  if (psig !== _lastPrefsSig) {
+    _lastPrefsSig = psig;
+    for (var m = 0; m < _injectedWins.length; m++) {
+      callHook(_injectedWins[m], "repaint");
+    }
   }
   var sig = readers.length + "/" + found + "/" + _injectedWins.length;
   if (sig !== tick._lastSig) {
@@ -467,12 +545,36 @@ function startup(data, reason) {
     _rootURI = null;
   }
   _active = true;
+  // Seed the render-affecting pref signature: the first tick must still sync
+  // setPrefs, but must not fire a spurious repaint. shutdown() deliberately
+  // leaves it in place so it also survives a shutdown/startup cycle.
+  _lastPrefsSig = prefSig(getPrefs());
   log("startup build=" + BUILD + " rootURI=" + _rootURI + " reason=" + reason);
   try {
     Zotero.Reader.registerEventListener("renderToolbar", onRenderToolbar, ADDON_ID);
     _listenerRegistered = true;
   } catch (e) {
     log("registerEventListener failed: " + (e && e.message ? e.message : e));
+  }
+  // Settings pane (Zotero 7+). pluginURL() returns a fully-formed jar:/file:
+  // URI that resolves inside both an unpacked directory and an .xpi. The
+  // returned Promise is best-effort: a failed registration must not block
+  // startup, and Zotero unregisters panes on shutdown by itself.
+  try {
+    var pane = Zotero.PreferencePanes.register({
+      pluginID: ADDON_ID,
+      src: pluginURL("content/preferences.xhtml"),
+      id: _paneID,
+      scripts: [pluginURL("content/preferences.js")],
+      helpURL: "https://github.com/Zhanyuanium/Zotero-PDF-Noir",
+    });
+    if (pane && typeof pane.catch === "function") {
+      pane.catch(function (e) {
+        log("PreferencePanes.register failed: " + (e && e.message ? e.message : e));
+      });
+    }
+  } catch (e) {
+    log("PreferencePanes.register failed: " + (e && e.message ? e.message : e));
   }
   // Cover readers already open, and pick up late-loading viewer iframes.
   if (!_timer) {

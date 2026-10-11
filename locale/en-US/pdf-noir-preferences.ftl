@@ -1,0 +1,16 @@
+pdfnoir-prefs-enable =
+    .label = Make figures readable on a dark background
+pdfnoir-prefs-intro = Applies to white-background line art in the PDF reader.
+pdfnoir-prefs-neutral-heading = Neutral ink
+pdfnoir-prefs-chroma-label =
+    .value = Neutral-colour threshold
+pdfnoir-prefs-chroma-help = Higher values weaken colour protection.
+pdfnoir-prefs-band-label =
+    .value = Lightness band width
+pdfnoir-prefs-band-help = A wider band also processes mid-tone pixels.
+pdfnoir-prefs-detection-heading = Detection
+pdfnoir-prefs-class-label =
+    .value = Detection sensitivity
+pdfnoir-prefs-class-help = Higher values treat more images as white-background line art.
+pdfnoir-prefs-reset =
+    .label = Restore Defaults

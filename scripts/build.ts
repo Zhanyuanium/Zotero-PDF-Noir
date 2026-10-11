@@ -29,9 +29,11 @@ await rm(STAGE_DIR, { recursive: true, force: true });
 await mkdir(STAGE_DIR, { recursive: true });
 
 // Allowlist — keeps dev files (README, scripts, .git) out of the xpi.
-// content/ carries the noir modules injected into the pdf.js viewer realm.
+// content/ carries the noir modules injected into the pdf.js viewer realm AND
+// the settings pane (preferences.xhtml/js); locale/ carries the Fluent strings
+// that pane loads.
 // LICENSE ships with the package: the add-on is distributed under AGPL-3.0.
-const entries = ["manifest.json", "bootstrap.js", "prefs.js", "content", "LICENSE"];
+const entries = ["manifest.json", "bootstrap.js", "prefs.js", "content", "locale", "LICENSE"];
 for (const e of entries) {
   await cp(path.join(ROOT, e), path.join(STAGE_DIR, e), { recursive: true });
 }

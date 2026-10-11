@@ -1,4 +1,4 @@
-/* Zotero PDF Noir — Blender hook (v1.0.0).
+/* Zotero PDF Noir — Blender hook (v1.1.0).
  *
  * Runs inside the pdf.js viewer realm. Intercepts the fork's image path:
  *
@@ -27,6 +27,16 @@
  *
  * Logging: lines are pushed to win.__PDFNoirLogs; bootstrap.js drains them
  * into Zotero.debug (the viewer realm has no Zotero object).
+ *
+ * Prefs (passed as primitives by bootstrap.js, which also clamps them):
+ *  - classSens: classification aggressiveness only (classify.decide);
+ *  - chromaT:   relative chroma gate of the pixel transform (0..1);
+ *  - bandWidth: width of the mirror-symmetric neutral band (0 disables both
+ *    ends; 1.0 is the maximum, where the two ramps overlap and a mid-tone
+ *    receives both effects);
+ *  - enabled:   master switch.
+ * The transform params are built once per draw (not per pixel) from the last
+ * two, so the cached result key always matches the transform that ran.
  */
 (function () {
   "use strict";
@@ -34,7 +44,7 @@
   var g = typeof window !== "undefined" ? window : globalThis;
   var NS = (g.PDFNoir = g.PDFNoir || {});
 
-  var BUILD = "1.0.0";
+  var BUILD = "1.1.0";
   var MAX_PIXELS = 8e6;
   var LOG_CAP = 800;
   var ATTACH_TRIES = 120;
@@ -51,6 +61,8 @@
     installed: false,
     win: null,
     sens: 0.7,
+    chromaT: 1.0,
+    bandWidth: 0.6,
     enabled: true,
     draws: 0,
     generation: 0,
@@ -107,10 +119,10 @@
 
   // ---- installation / prototype wrapping -------------------------------
 
-  function install(win, sens, enabled) {
+  function install(win, classSens, chromaT, bandWidth, enabled) {
     win = win || g;
     if (state.installed && state.win === win) {
-      setPrefs(sens, enabled);
+      setPrefs(classSens, chromaT, bandWidth, enabled);
       return true;
     }
     if (state.installed) {
@@ -119,16 +131,27 @@
     state.generation++;
     state.installed = true;
     state.win = win;
-    state.sens = num(sens, 0.7);
+    state.sens = num(classSens, 0.7);
+    state.chromaT = num(chromaT, 1.0);
+    state.bandWidth = num(bandWidth, 0.6);
     state.enabled = enabled !== false;
     state.draws = 0;
-    log(win, "hook install build=" + BUILD + " sens=" + state.sens + " theme " + themeDesc(win));
+    log(
+      win,
+      "hook install build=" + BUILD +
+        " sens=" + state.sens +
+        " chromaT=" + state.chromaT +
+        " bandWidth=" + state.bandWidth +
+        " theme " + themeDesc(win)
+    );
     attach(win, 0);
     return true;
   }
 
-  function setPrefs(sens, enabled) {
-    state.sens = num(sens, state.sens);
+  function setPrefs(classSens, chromaT, bandWidth, enabled) {
+    state.sens = num(classSens, state.sens);
+    state.chromaT = num(chromaT, state.chromaT);
+    state.bandWidth = num(bandWidth, state.bandWidth);
     state.enabled = enabled !== false;
   }
 
@@ -164,23 +187,7 @@
         }
         var proto = Object.getPrototypeOf(page);
         wrapRender(win, proto);
-        // Force a repaint so currently visible pages get the noir path now:
-        // the page restored on startup may have rendered before the hook was
-        // armed, and update() alone does not re-render an unchanged page.
-        try {
-          var pages = app.pdfViewer._pages || [];
-          for (var i = 0; i < pages.length; i++) {
-            var pv = pages[i];
-            try {
-              if (pv && typeof pv.reset === "function") {
-                pv.reset();
-              }
-            } catch (eReset) {}
-          }
-        } catch (ePages) {}
-        try {
-          app.pdfViewer.update();
-        } catch (e) {}
+        repaint(win, app);
         log(win, "attached; Blender hook armed");
       })
       .catch(function (err) {
@@ -189,6 +196,30 @@
         }
         log(win, "attach getPage failed: " + (err && err.message ? err.message : err));
       });
+  }
+
+  /**
+   * Force a repaint so currently visible pages get the noir path now: the
+   * page restored on startup may have rendered before the hook was armed,
+   * and update() alone does not re-render an unchanged page. Takes the app
+   * explicitly so callers that already hold it (attach, the prefs repaint)
+   * do not depend on state.win.
+   */
+  function repaint(win, app) {
+    try {
+      var pages = app.pdfViewer._pages || [];
+      for (var i = 0; i < pages.length; i++) {
+        var pv = pages[i];
+        try {
+          if (pv && typeof pv.reset === "function") {
+            pv.reset();
+          }
+        } catch (eReset) {}
+      }
+    } catch (ePages) {}
+    try {
+      app.pdfViewer.update();
+    } catch (e) {}
   }
 
   function wrapRender(win, proto) {
@@ -562,7 +593,10 @@
       return null;
     }
 
-    var rkey = transfer ? null : NS.cache.resKey(fkey, state.sens, fgHex);
+    // One params build per draw (not per pixel): the result key below must
+    // be the exact key of the transform that will run, so both use this P.
+    var P = NS.transform.params({ chromaT: state.chromaT, bandWidth: state.bandWidth });
+    var rkey = transfer ? null : NS.cache.resKey(fkey, P, fgHex);
     var res = transfer ? null : NS.cache.getResult(srcObj, rkey);
     var resMiss = false;
     if (!res) {
@@ -573,7 +607,7 @@
       var octx = off.getContext("2d");
       octx.drawImage(img, rect.sX, rect.sY, rect.sW, rect.sH, 0, 0, rect.sW, rect.sH);
       var idata = octx.getImageData(0, 0, rect.sW, rect.sH);
-      var tr = NS.transform.transformImageData(idata, state.sens, fgHex);
+      var tr = NS.transform.transformImageData(idata, P, fgHex);
       octx.putImageData(idata, 0, 0);
       res = { canvas: off, removedFrac: tr.removedFrac };
       if (!transfer) {
@@ -640,6 +674,26 @@
     uninstall: uninstall,
     isInstalled: function () {
       return state.installed;
+    },
+    /**
+     * Repaint the current viewer after a pref change. Deliberately safe to
+     * call at any time: not installed, or an app that has not finished
+     * loading, is a no-op — a pref tick must never break the viewer.
+     */
+    repaint: function () {
+      if (!state.installed || !state.win) {
+        return;
+      }
+      try {
+        var app = state.win.PDFViewerApplication;
+        if (!app || !app.pdfViewer) {
+          return;
+        }
+        repaint(state.win, app);
+        log(state.win, "repaint (prefs changed)");
+      } catch (e) {
+        /* best-effort: never throw out of a pref change */
+      }
     },
   };
 })();
